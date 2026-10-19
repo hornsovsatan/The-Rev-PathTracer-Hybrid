@@ -1,0 +1,65 @@
+/*
+--------------------------------------------------------------------------------
+
+	Revelation Shaders
+
+	Copyright (C) 2026 HaringPro
+	Apache License 2.0
+
+	Pass: Variance estimation for SVGF
+	Modified: wide-footprint moments + young-history variance boost (RPGI style)
+
+--------------------------------------------------------------------------------
+*/
+
+//======// Utility //=============================================================================//
+
+#include "/lib/Utility.glsl"
+
+//======// Input //===============================================================================//
+
+layout(local_size_x = 16, local_size_y = 16) in;
+const vec2 workGroupsRender = vec2(PT_GI_SCALE, PT_GI_SCALE);
+
+//======// Uniform //=============================================================================//
+
+writeonly restrict uniform image2D colorimg3;
+
+#include "/lib/universal/Uniform.glsl"
+
+//======// SSBO //================================================================================//
+
+#include "/lib/universal/SSBO.glsl"
+
+//======// Main //================================================================================//
+void main() {
+	ivec2 texelPos = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 texelEnd = ivec2(PT_GI_SIZE) - 1;
+	if (any(greaterThan(texelPos, texelEnd))) return;
+
+	vec4 integratedDiffuse = texelFetch(colortex2, texelPos, 0);
+
+	// Moments 3x3 dengan jarak PT_SVGF_VARIANCE_STRIDE (RPGI: jarak 2 -> area 5x5)
+	vec2 moments = vec2(0.0);
+	for (int y = -1; y <= 1; ++y) {
+		for (int x = -1; x <= 1; ++x) {
+			ivec2 sampleTexel = clamp(texelPos + ivec2(x, y) * PT_SVGF_VARIANCE_STRIDE, ivec2(0), texelEnd);
+			float luma = max0(texelFetch(colortex2, sampleTexel, 0).x);
+			luma *= rcp(1.0 + luma); // Ruang tonemapped yang sama dengan filter
+			moments += vec2(luma, luma * luma);
+		}
+	}
+	moments *= rcp(9.0);
+
+	float variance = 16.0 * max0(moments.y - moments.x * moments.x);
+
+	// RPGI: piksel dengan riwayat pendek (baru muncul / kamera bergerak) diberi
+	// variance ekstra -> filter spasial otomatis memblur lebih kuat
+	float accumFrames = max(integratedDiffuse.a, 1.0) * float(PT_SPP);
+	variance += moments.x * moments.x / max(exp2(min(accumFrames, 30.0)) - 1.0, 1e-5);
+
+	// Tonemapping untuk filter spasial (menekan firefly)
+	integratedDiffuse.rgb *= rcp(1.0 + max0(integratedDiffuse.x));
+
+	imageStore(colorimg3, texelPos, vec4(integratedDiffuse.rgb, variance));
+}
